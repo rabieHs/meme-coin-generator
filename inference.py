@@ -1,20 +1,11 @@
 import torch
 import argparse
 import requests
-import warnings
-import json
 from PIL import Image
 from io import BytesIO
 from transformers import LlavaNextProcessor, LlavaNextForConditionalGeneration
 from peft import PeftModel
-
-# Check if flash-attn is available
-try:
-    import flash_attn
-    HAS_FLASH_ATTN = True
-except ImportError:
-    HAS_FLASH_ATTN = False
-    warnings.warn("flash-attn is not installed. Inference will proceed without it, but may be slower.")
+import json
 
 def load_model(model_path, use_lora=False, base_model="llava-hf/llava-v1.6-mistral-7b-hf", quantize=False):
     """Load the fine-tuned model."""
@@ -22,25 +13,18 @@ def load_model(model_path, use_lora=False, base_model="llava-hf/llava-v1.6-mistr
     processor = LlavaNextProcessor.from_pretrained(model_path if not use_lora else base_model)
     
     # Load model with quantization if specified
-    model_kwargs = {
-        "torch_dtype": torch.float16,
-        "device_map": "auto"
-    }
-    
-    # Add flash attention if available
-    if HAS_FLASH_ATTN:
-        model_kwargs["use_flash_attention_2"] = True
-    
     if quantize:
-        model_kwargs["load_in_4bit"] = True
         model = LlavaNextForConditionalGeneration.from_pretrained(
             base_model if use_lora else model_path,
-            **model_kwargs
+            torch_dtype=torch.float16,
+            load_in_4bit=True,
+            device_map="auto"
         )
     else:
         model = LlavaNextForConditionalGeneration.from_pretrained(
             base_model if use_lora else model_path,
-            **model_kwargs
+            torch_dtype=torch.float16,
+            device_map="auto"
         )
     
     # Load LoRA weights if using LoRA
@@ -57,9 +41,12 @@ def generate_meme_coin(model, processor, image_url, tweet_text, max_new_tokens=1
         response.raise_for_status()
         image = Image.open(BytesIO(response.content)).convert("RGB")
         
+        # Create prompt
+        prompt = f"<image>\nTweet text: {tweet_text}\n"
+        
         # Process inputs
         inputs = processor(
-            text=f"Tweet text: {tweet_text}" if tweet_text else "",
+            text=prompt,
             images=image,
             return_tensors="pt"
         ).to(model.device)

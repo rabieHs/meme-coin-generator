@@ -82,42 +82,52 @@ def main(args):
     # Load the dataset
     train_dataset, val_dataset = load_dataset(args.data_dir)
     
-    # Create a simple dataset class for training
+    # Create a custom dataset class
     class LlavaDataset(torch.utils.data.Dataset):
         def __init__(self, dataset, processor, data_dir):
             self.dataset = dataset
             self.processor = processor
             self.data_dir = data_dir
+            
+            # Prepare the prompts
+            self.prompts = []
+            self.image_paths = []
+            
+            for item in self.dataset:
+                # Create prompt
+                prompt = f"<image>\n{item['text']}\n"
+                self.prompts.append(prompt)
+                
+                # Get image path
+                image_path = os.path.join(self.data_dir, item["image_path"])
+                self.image_paths.append(image_path)
         
         def __len__(self):
             return len(self.dataset)
         
         def __getitem__(self, idx):
-            item = self.dataset[idx]
+            # Get prompt and image path
+            prompt = self.prompts[idx]
+            image_path = self.image_paths[idx]
             
             # Load image
             try:
-                image_path = item["image_path"]
-                full_path = os.path.join(self.data_dir, image_path)
-                if os.path.exists(full_path):
-                    image = Image.open(full_path).convert("RGB")
+                if os.path.exists(image_path):
+                    image = Image.open(image_path).convert("RGB")
                 else:
                     # Use a blank image if path is invalid
-                    print(f"Warning: Image not found at {full_path}")
+                    print(f"Warning: Image not found at {image_path}")
                     image = Image.new('RGB', (224, 224), color='white')
             except Exception as e:
-                print(f"Error loading image {item['image_path']}: {e}")
+                print(f"Error loading image {image_path}: {e}")
                 # Use a blank image if there's an error
                 image = Image.new('RGB', (224, 224), color='white')
             
             # Process inputs
             inputs = self.processor(
-                text=item["text"],
+                text=prompt,
                 images=image,
-                return_tensors="pt",
-                padding="max_length",
-                truncation=True,
-                max_length=512
+                return_tensors="pt"
             )
             
             # Remove batch dimension
@@ -132,17 +142,6 @@ def main(args):
     # Create datasets
     train_dataset_processed = LlavaDataset(train_dataset, processor, args.data_dir)
     val_dataset_processed = LlavaDataset(val_dataset, processor, args.data_dir)
-    
-    # Define data collator
-    def collate_fn(batch):
-        # Collate the batch
-        batch_dict = {}
-        for k in batch[0].keys():
-            if k == "pixel_values":
-                batch_dict[k] = torch.stack([item[k] for item in batch])
-            else:
-                batch_dict[k] = torch.stack([item[k] for item in batch])
-        return batch_dict
     
     # Set up training arguments
     training_args = TrainingArguments(
@@ -162,11 +161,11 @@ def main(args):
         save_steps=args.save_steps,
         save_total_limit=3,
         load_best_model_at_end=True,
-        metric_for_best_model="eval_loss",
+        metric_for_best_model="loss",
         greater_is_better=False,
         fp16=True,
         report_to="none",
-        remove_unused_columns=False  # Important for custom datasets
+        remove_unused_columns=False
     )
     
     # Initialize trainer
@@ -174,8 +173,7 @@ def main(args):
         model=model,
         args=training_args,
         train_dataset=train_dataset_processed,
-        eval_dataset=val_dataset_processed,
-        data_collator=collate_fn
+        eval_dataset=val_dataset_processed
     )
     
     # Start training
