@@ -7,8 +7,7 @@ from transformers import (
     LlavaNextProcessor, 
     LlavaNextForConditionalGeneration,
     TrainingArguments,
-    Trainer,
-    DataCollatorForLanguageModeling
+    Trainer
 )
 from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
 from datasets import Dataset
@@ -83,70 +82,67 @@ def main(args):
     # Load the dataset
     train_dataset, val_dataset = load_dataset(args.data_dir)
     
-    # Define preprocessing function
-    def preprocess_function(examples):
-        # Process each example individually to avoid padding issues
-        processed_examples = {
-            "input_ids": [],
-            "attention_mask": [],
-            "pixel_values": []
-        }
+    # Create a simple dataset class for training
+    class LlavaDataset(torch.utils.data.Dataset):
+        def __init__(self, dataset, processor, data_dir):
+            self.dataset = dataset
+            self.processor = processor
+            self.data_dir = data_dir
         
-        for i in range(len(examples["text"])):
+        def __len__(self):
+            return len(self.dataset)
+        
+        def __getitem__(self, idx):
+            item = self.dataset[idx]
+            
             # Load image
             try:
-                image_path = examples["image_path"][i]
-                full_path = os.path.join(args.data_dir, image_path)
+                image_path = item["image_path"]
+                full_path = os.path.join(self.data_dir, image_path)
                 if os.path.exists(full_path):
-                    img = Image.open(full_path).convert("RGB")
+                    image = Image.open(full_path).convert("RGB")
                 else:
                     # Use a blank image if path is invalid
                     print(f"Warning: Image not found at {full_path}")
-                    img = Image.new('RGB', (224, 224), color='white')
+                    image = Image.new('RGB', (224, 224), color='white')
             except Exception as e:
-                print(f"Error loading image {examples['image_path'][i]}: {e}")
+                print(f"Error loading image {item['image_path']}: {e}")
                 # Use a blank image if there's an error
-                img = Image.new('RGB', (224, 224), color='white')
+                image = Image.new('RGB', (224, 224), color='white')
             
-            # Process single example
-            inputs = processor(
-                text=examples["text"][i],
-                images=img,
+            # Process inputs
+            inputs = self.processor(
+                text=item["text"],
+                images=image,
                 return_tensors="pt",
                 padding="max_length",
                 truncation=True,
                 max_length=512
             )
             
-            # Add to processed examples
-            processed_examples["input_ids"].append(inputs["input_ids"][0])
-            processed_examples["attention_mask"].append(inputs["attention_mask"][0])
-            processed_examples["pixel_values"].append(inputs["pixel_values"][0])
-        
-        # Stack tensors
-        processed_examples["input_ids"] = torch.stack(processed_examples["input_ids"])
-        processed_examples["attention_mask"] = torch.stack(processed_examples["attention_mask"])
-        processed_examples["pixel_values"] = torch.stack(processed_examples["pixel_values"])
-        
-        # Add labels for training
-        processed_examples["labels"] = processed_examples["input_ids"].clone()
-        
-        return processed_examples
+            # Remove batch dimension
+            for k, v in inputs.items():
+                inputs[k] = v.squeeze(0)
+            
+            # Add labels for training
+            inputs["labels"] = inputs["input_ids"].clone()
+            
+            return inputs
     
-    # Preprocess the datasets
-    train_dataset = train_dataset.map(
-        preprocess_function,
-        batched=True,
-        batch_size=1,  # Process one example at a time
-        remove_columns=["text", "image_path", "response"]
-    )
+    # Create datasets
+    train_dataset_processed = LlavaDataset(train_dataset, processor, args.data_dir)
+    val_dataset_processed = LlavaDataset(val_dataset, processor, args.data_dir)
     
-    val_dataset = val_dataset.map(
-        preprocess_function,
-        batched=True,
-        batch_size=1,  # Process one example at a time
-        remove_columns=["text", "image_path", "response"]
-    )
+    # Define data collator
+    def collate_fn(batch):
+        # Collate the batch
+        batch_dict = {}
+        for k in batch[0].keys():
+            if k == "pixel_values":
+                batch_dict[k] = torch.stack([item[k] for item in batch])
+            else:
+                batch_dict[k] = torch.stack([item[k] for item in batch])
+        return batch_dict
     
     # Set up training arguments
     training_args = TrainingArguments(
@@ -155,7 +151,7 @@ def main(args):
         per_device_train_batch_size=args.batch_size,
         per_device_eval_batch_size=args.batch_size,
         gradient_accumulation_steps=args.gradient_accumulation_steps,
-        eval_strategy="steps",
+        evaluation_strategy="steps",
         eval_steps=args.eval_steps,
         logging_dir=os.path.join(args.output_dir, "logs"),
         logging_steps=10,
@@ -169,15 +165,17 @@ def main(args):
         metric_for_best_model="eval_loss",
         greater_is_better=False,
         fp16=True,
-        report_to="none"
+        report_to="none",
+        remove_unused_columns=False  # Important for custom datasets
     )
     
     # Initialize trainer
     trainer = Trainer(
         model=model,
         args=training_args,
-        train_dataset=train_dataset,
-        eval_dataset=val_dataset
+        train_dataset=train_dataset_processed,
+        eval_dataset=val_dataset_processed,
+        data_collator=collate_fn
     )
     
     # Start training
