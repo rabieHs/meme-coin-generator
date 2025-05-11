@@ -258,4 +258,4 @@ async def health_check():
 
 # Run the API server
 if __name__ == "__main__":
-    uvicorn.run("api_server_improved:app", host="0.0.0.0", port=PORT, log_level="info")
+    uvicorn.run("api_server:app", host="0.0.0.0", port=PORT, log_level="info")
