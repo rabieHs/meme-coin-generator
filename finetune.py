@@ -85,50 +85,66 @@ def main(args):
     
     # Define preprocessing function
     def preprocess_function(examples):
-        # Load images
-        images = []
-        for path in examples["image_path"]:
+        # Process each example individually to avoid padding issues
+        processed_examples = {
+            "input_ids": [],
+            "attention_mask": [],
+            "pixel_values": []
+        }
+        
+        for i in range(len(examples["text"])):
+            # Load image
             try:
-                full_path = os.path.join(args.data_dir, path)
+                image_path = examples["image_path"][i]
+                full_path = os.path.join(args.data_dir, image_path)
                 if os.path.exists(full_path):
                     img = Image.open(full_path).convert("RGB")
                 else:
                     # Use a blank image if path is invalid
                     print(f"Warning: Image not found at {full_path}")
                     img = Image.new('RGB', (224, 224), color='white')
-                images.append(img)
             except Exception as e:
-                print(f"Error loading image {path}: {e}")
+                print(f"Error loading image {examples['image_path'][i]}: {e}")
                 # Use a blank image if there's an error
                 img = Image.new('RGB', (224, 224), color='white')
-                images.append(img)
+            
+            # Process single example
+            inputs = processor(
+                text=examples["text"][i],
+                images=img,
+                return_tensors="pt",
+                padding="max_length",
+                truncation=True,
+                max_length=512
+            )
+            
+            # Add to processed examples
+            processed_examples["input_ids"].append(inputs["input_ids"][0])
+            processed_examples["attention_mask"].append(inputs["attention_mask"][0])
+            processed_examples["pixel_values"].append(inputs["pixel_values"][0])
         
-        # Process inputs
-        inputs = processor(
-            text=examples["text"],
-            images=images,
-            padding="max_length",
-            truncation=True,
-            return_tensors="pt"
-        )
+        # Stack tensors
+        processed_examples["input_ids"] = torch.stack(processed_examples["input_ids"])
+        processed_examples["attention_mask"] = torch.stack(processed_examples["attention_mask"])
+        processed_examples["pixel_values"] = torch.stack(processed_examples["pixel_values"])
         
         # Add labels for training
-        inputs["labels"] = inputs["input_ids"].clone()
+        processed_examples["labels"] = processed_examples["input_ids"].clone()
         
-        return inputs
+        return processed_examples
     
     # Preprocess the datasets
     train_dataset = train_dataset.map(
         preprocess_function,
         batched=True,
-        batch_size=4,
+        batch_size=1,  # Process one example at a time
         remove_columns=["text", "image_path", "response"]
     )
     
     val_dataset = val_dataset.map(
         preprocess_function,
         batched=True,
-        batch_size=4,
+        batch_size=1,  # Process one example at a time
         remove_columns=["text", "image_path", "response"]
     )
     
@@ -156,19 +172,12 @@ def main(args):
         report_to="none"
     )
     
-    # Create data collator
-    data_collator = DataCollatorForLanguageModeling(
-        tokenizer=processor.tokenizer,
-        mlm=False
-    )
-    
     # Initialize trainer
     trainer = Trainer(
         model=model,
         args=training_args,
         train_dataset=train_dataset,
-        eval_dataset=val_dataset,
-        data_collator=data_collator
+        eval_dataset=val_dataset
     )
     
     # Start training
