@@ -1,25 +1,42 @@
+# Create the startup script
+
 #!/bin/bash
 
-# Update system packages
-apt-get update && apt-get install -y git wget ninja-build
+# Activate the virtual environment
+source /workspace/llava-env/bin/activate
 
-# Create and activate conda environment
-conda create -n llava_env python=3.10 -y
-source activate llava_env
+# Check if the repository exists
+if [ ! -d "/workspace/meme-coin-generator" ]; then
+  # Clone the repository
+  git clone https://github.com/rabieHs/meme-coin-generator.git /workspace/meme-coin-generator
+fi
 
-# Install PyTorch with CUDA support
-pip install torch==2.0.1 torchvision==0.15.2 torchaudio==2.0.2 --index-url https://download.pytorch.org/whl/cu118
+# Create symbolic links
+cd /workspace/meme-coin-generator
+ln -sf /workspace/data data
+ln -sf /workspace/models models
+ln -sf /workspace/fine_tuned_model fine_tuned_model
+ln -sf /workspace/logs logs
 
-# Install other dependencies
-pip install -r requirements.txt
+# Kill the existing API server if it's running
+if [ -f "/workspace/api_server.pid" ]; then
+  kill $(cat /workspace/api_server.pid) 2>/dev/null || true
+  rm /workspace/api_server.pid
+fi
 
-# Try to install flash-attn from pre-built wheel (optional)
-echo "Attempting to install flash-attn (optional)..."
-pip install flash-attn --no-build-isolation || echo "Flash Attention installation failed, but this is optional and won't affect basic functionality"
+# Set environment variables
+export MODEL_PATH=/workspace/fine_tuned_model
+export USE_LORA=true
+export BASE_MODEL=/workspace/models/llava-v1.6-mistral-7b-hf
+export QUANTIZE=true
+export PORT=8000
 
-# Create directories for model and data
-mkdir -p models
-mkdir -p data
-mkdir -p fine_tuned_model
+# Start the API server in the background
+mkdir -p /workspace/logs
+nohup python /workspace/meme-coin-generator/api_server.py > /workspace/logs/api_server.log 2>&1 &
 
-echo "Setup completed successfully!"
+# Save the process ID
+echo $! > /workspace/api_server.pid
+
+echo "API server started with PID $(cat /workspace/api_server.pid)"
+echo "To check the logs, run: cat /workspace/logs/api_server.log"
