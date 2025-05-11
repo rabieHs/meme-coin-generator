@@ -1,3 +1,4 @@
+# Create an updated inference script
 import torch
 import argparse
 import requests
@@ -6,6 +7,7 @@ from io import BytesIO
 from transformers import LlavaNextProcessor, LlavaNextForConditionalGeneration
 from peft import PeftModel
 import json
+import re
 
 def load_model(model_path, use_lora=False, base_model="llava-hf/llava-v1.6-mistral-7b-hf", quantize=False):
     """Load the fine-tuned model."""
@@ -33,6 +35,32 @@ def load_model(model_path, use_lora=False, base_model="llava-hf/llava-v1.6-mistr
     
     return model, processor
 
+def extract_token_info_from_text(text):
+    """Extract token name and ticker from generated text using regex."""
+    # Try to find token name pattern
+    token_name_match = re.search(r'token\s*name[:\s]+([A-Za-z0-9\s]+)', text, re.IGNORECASE)
+    ticker_match = re.search(r'ticker[:\s]+([A-Z0-9]+)', text, re.IGNORECASE)
+    
+    token_name = token_name_match.group(1).strip() if token_name_match else None
+    ticker = ticker_match.group(1).strip() if ticker_match else None
+    
+    # If not found, try to extract any capitalized words as token name and ticker
+    if not token_name:
+        words = re.findall(r'\b[A-Z][A-Z0-9]+\b', text)
+        if words:
+            if not ticker and len(words) > 0:
+                ticker = words[0]
+            if not token_name and len(words) > 1:
+                token_name = ' '.join(words[:-1])
+    
+    # If still not found, use default values
+    if not token_name:
+        token_name = "UNKNOWN TOKEN"
+    if not ticker:
+        ticker = "UNKN"
+    
+    return {"tokenName": token_name, "ticker": ticker}
+
 def generate_meme_coin(model, processor, image_url, tweet_text, max_new_tokens=100):
     """Generate meme coin name and ticker from image and tweet."""
     try:
@@ -41,8 +69,19 @@ def generate_meme_coin(model, processor, image_url, tweet_text, max_new_tokens=1
         response.raise_for_status()
         image = Image.open(BytesIO(response.content)).convert("RGB")
         
-        # Create prompt
-        prompt = f"<image>\nTweet text: {tweet_text}\n"
+        # Create a better prompt
+        prompt = f"""<image>
+Based on the image and tweet, generate a meme coin name and ticker.
+Tweet: {tweet_text}
+
+Generate a JSON response with the following format:
+{{
+  "tokenName": "MEME COIN NAME",
+  "ticker": "TICKER"
+}}
+
+JSON response:
+"""
         
         # Process inputs
         inputs = processor(
@@ -56,7 +95,9 @@ def generate_meme_coin(model, processor, image_url, tweet_text, max_new_tokens=1
             output = model.generate(
                 **inputs,
                 max_new_tokens=max_new_tokens,
-                do_sample=False
+                do_sample=True,
+                temperature=0.7,
+                top_p=0.9
             )
         
         # Decode response
@@ -70,13 +111,27 @@ def generate_meme_coin(model, processor, image_url, tweet_text, max_new_tokens=1
             
             if start_idx >= 0 and end_idx > start_idx:
                 json_str = generated_text[start_idx:end_idx]
-                result = json.loads(json_str)
-                return result
+                try:
+                    result = json.loads(json_str)
+                    # Validate the result has the expected fields
+                    if "tokenName" not in result or "ticker" not in result:
+                        # Extract from text if JSON is invalid
+                        result = extract_token_info_from_text(generated_text)
+                    return result
+                except json.JSONDecodeError:
+                    # Extract from text if JSON is invalid
+                    result = extract_token_info_from_text(generated_text)
+                    return result
             else:
-                return {"error": "No JSON found in response", "raw_response": generated_text}
+                # Extract from text if no JSON found
+                result = extract_token_info_from_text(generated_text)
+                return result
         
-        except json.JSONDecodeError:
-            return {"error": "Invalid JSON in response", "raw_response": generated_text}
+        except Exception as e:
+            print(f"Error extracting JSON: {e}")
+            # Extract from text as fallback
+            result = extract_token_info_from_text(generated_text)
+            return result
     
     except Exception as e:
         return {"error": str(e)}
