@@ -56,32 +56,24 @@ def prepare_dataset(csv_path, output_dir, split_ratio=0.9):
         image_path = os.path.join(output_dir, "images", image_filename)
         
         if download_image(image_url, image_path):
-            # Create conversation data
-            conversation = [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": f"Tweet text: {tweet_text}" if tweet_text and not pd.isna(tweet_text) else ""},
-                        {"type": "image", "image_path": f"images/{image_filename}"}
-                    ]
-                },
-                {
-                    "role": "assistant",
-                    "content": json.dumps({"tokenName": token_name, "ticker": ticker})
-                }
-            ]
+            # Create simple data format
+            data_item = {
+                "text": f"Tweet text: {tweet_text}" if tweet_text and not pd.isna(tweet_text) else "",
+                "image_path": os.path.join("images", image_filename),
+                "response": json.dumps({"tokenName": token_name, "ticker": ticker})
+            }
             
             # Add to train or validation set
             if random.random() < split_ratio:
-                train_data.append(conversation)
+                train_data.append(data_item)
             else:
-                val_data.append(conversation)
+                val_data.append(data_item)
     
     # Save the processed data
-    with open(os.path.join(output_dir, "train", "conversations.json"), "w") as f:
+    with open(os.path.join(output_dir, "train", "data.json"), "w") as f:
         json.dump(train_data, f, indent=2)
     
-    with open(os.path.join(output_dir, "val", "conversations.json"), "w") as f:
+    with open(os.path.join(output_dir, "val", "data.json"), "w") as f:
         json.dump(val_data, f, indent=2)
     
     print(f"Dataset prepared: {len(train_data)} training samples, {len(val_data)} validation samples")

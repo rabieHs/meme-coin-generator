@@ -2,10 +2,9 @@ import os
 import json
 import torch
 import argparse
-import warnings
 from PIL import Image
 from transformers import (
-    LlavaNextProcessor,
+    LlavaNextProcessor, 
     LlavaNextForConditionalGeneration,
     TrainingArguments,
     Trainer,
@@ -13,7 +12,7 @@ from transformers import (
 )
 from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
 from datasets import Dataset
-from tqdm import tqdm
+import warnings
 
 # Check if flash-attn is available
 try:
@@ -23,103 +22,38 @@ except ImportError:
     HAS_FLASH_ATTN = False
     warnings.warn("flash-attn is not installed. Training will proceed without it, but may be slower.")
 
-def load_dataset(data_dir, processor):
-    """Load and process the dataset for fine-tuning."""
-
-    def process_conversation(conversation, images_dir):
-        """Process a single conversation."""
-        # Extract user message
-        user_message = conversation[0]
-        assistant_message = conversation[1]
-
-        # Get image path if present
-        image_path = None
-        text_prompt = ""
-
-        for content in user_message["content"]:
-            if content["type"] == "image":
-                image_path = os.path.join(images_dir, content["image_path"].split("/")[-1])
-            elif content["type"] == "text":
-                text_prompt += content["text"]
-
-        # Get assistant response (expected to be JSON)
-        response = assistant_message["content"]
-
-        return {
-            "image_path": image_path,
-            "text_prompt": text_prompt,
-            "response": response
-        }
-
+def load_dataset(data_dir):
+    """Load the dataset for fine-tuning."""
     # Load train and validation data
-    train_file = os.path.join(data_dir, "train", "conversations.json")
-    val_file = os.path.join(data_dir, "val", "conversations.json")
-    images_dir = os.path.join(data_dir, "images")
-
+    train_file = os.path.join(data_dir, "train", "data.json")
+    val_file = os.path.join(data_dir, "val", "data.json")
+    
     with open(train_file, "r") as f:
         train_data = json.load(f)
-
+    
     with open(val_file, "r") as f:
         val_data = json.load(f)
-
-    # Process the data
-    train_processed = [process_conversation(conv, images_dir) for conv in tqdm(train_data, desc="Processing train data")]
-    val_processed = [process_conversation(conv, images_dir) for conv in tqdm(val_data, desc="Processing val data")]
-
+    
     # Create datasets
-    train_dataset = Dataset.from_list(train_processed)
-    val_dataset = Dataset.from_list(val_processed)
-
-    # Tokenize the datasets
-    def tokenize_function(examples):
-        images = [Image.open(path).convert("RGB") for path in examples["image_path"]]
-
-        # Create conversation format
-        conversations = []
-        for i in range(len(examples["text_prompt"])):
-            conversation = [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": examples["text_prompt"][i]},
-                        {"type": "image"}
-                    ]
-                },
-                {
-                    "role": "assistant",
-                    "content": examples["response"][i]
-                }
-            ]
-            conversations.append(conversation)
-
-        # Apply chat template
-        prompts = [processor.apply_chat_template(conv, add_generation_prompt=True) for conv in conversations]
-
-        # Tokenize
-        tokenized = processor(images=images, text=prompts, padding="max_length", truncation=True, return_tensors="pt")
-
-        return tokenized
-
-    # Apply tokenization
-    train_tokenized = train_dataset.map(tokenize_function, batched=True, batch_size=8)
-    val_tokenized = val_dataset.map(tokenize_function, batched=True, batch_size=8)
-
-    return train_tokenized, val_tokenized
+    train_dataset = Dataset.from_list(train_data)
+    val_dataset = Dataset.from_list(val_data)
+    
+    return train_dataset, val_dataset
 
 def main(args):
     # Load model and processor
     processor = LlavaNextProcessor.from_pretrained(args.model_name)
-
+    
     # Load model with quantization if specified
     model_kwargs = {
         "torch_dtype": torch.float16,
         "device_map": "auto"
     }
-
+    
     # Add flash attention if available
     if HAS_FLASH_ATTN:
         model_kwargs["use_flash_attention_2"] = True
-
+    
     if args.quantize:
         model_kwargs["load_in_4bit"] = True
         model = LlavaNextForConditionalGeneration.from_pretrained(
@@ -132,7 +66,7 @@ def main(args):
             args.model_name,
             **model_kwargs
         )
-
+    
     # Configure LoRA
     if args.use_lora:
         lora_config = LoraConfig(
@@ -145,10 +79,59 @@ def main(args):
         )
         model = get_peft_model(model, lora_config)
         model.print_trainable_parameters()
-
-    # Load and process the dataset
-    train_dataset, val_dataset = load_dataset(args.data_dir, processor)
-
+    
+    # Load the dataset
+    train_dataset, val_dataset = load_dataset(args.data_dir)
+    
+    # Define preprocessing function
+    def preprocess_function(examples):
+        # Load images
+        images = []
+        for path in examples["image_path"]:
+            try:
+                full_path = os.path.join(args.data_dir, path)
+                if os.path.exists(full_path):
+                    img = Image.open(full_path).convert("RGB")
+                else:
+                    # Use a blank image if path is invalid
+                    print(f"Warning: Image not found at {full_path}")
+                    img = Image.new('RGB', (224, 224), color='white')
+                images.append(img)
+            except Exception as e:
+                print(f"Error loading image {path}: {e}")
+                # Use a blank image if there's an error
+                img = Image.new('RGB', (224, 224), color='white')
+                images.append(img)
+        
+        # Process inputs
+        inputs = processor(
+            text=examples["text"],
+            images=images,
+            padding="max_length",
+            truncation=True,
+            return_tensors="pt"
+        )
+        
+        # Add labels for training
+        inputs["labels"] = inputs["input_ids"].clone()
+        
+        return inputs
+    
+    # Preprocess the datasets
+    train_dataset = train_dataset.map(
+        preprocess_function,
+        batched=True,
+        batch_size=4,
+        remove_columns=["text", "image_path", "response"]
+    )
+    
+    val_dataset = val_dataset.map(
+        preprocess_function,
+        batched=True,
+        batch_size=4,
+        remove_columns=["text", "image_path", "response"]
+    )
+    
     # Set up training arguments
     training_args = TrainingArguments(
         output_dir=args.output_dir,
@@ -172,13 +155,13 @@ def main(args):
         fp16=True,
         report_to="none"
     )
-
+    
     # Create data collator
     data_collator = DataCollatorForLanguageModeling(
         tokenizer=processor.tokenizer,
         mlm=False
     )
-
+    
     # Initialize trainer
     trainer = Trainer(
         model=model,
@@ -187,14 +170,14 @@ def main(args):
         eval_dataset=val_dataset,
         data_collator=data_collator
     )
-
+    
     # Start training
     trainer.train()
-
+    
     # Save the fine-tuned model
     model.save_pretrained(args.output_dir)
     processor.save_pretrained(args.output_dir)
-
+    
     print(f"Fine-tuning completed. Model saved to {args.output_dir}")
 
 if __name__ == "__main__":
@@ -210,6 +193,6 @@ if __name__ == "__main__":
     parser.add_argument("--save_steps", type=int, default=500, help="Save steps")
     parser.add_argument("--use_lora", action="store_true", help="Use LoRA for fine-tuning")
     parser.add_argument("--quantize", action="store_true", help="Use 4-bit quantization")
-
+    
     args = parser.parse_args()
     main(args)

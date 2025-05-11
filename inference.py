@@ -2,6 +2,7 @@ import torch
 import argparse
 import requests
 import warnings
+import json
 from PIL import Image
 from io import BytesIO
 from transformers import LlavaNextProcessor, LlavaNextForConditionalGeneration
@@ -18,18 +19,18 @@ except ImportError:
 def load_model(model_path, use_lora=False, base_model="llava-hf/llava-v1.6-mistral-7b-hf", quantize=False):
     """Load the fine-tuned model."""
     # Load processor
-    processor = LlavaNextProcessor.from_pretrained(model_path)
-
+    processor = LlavaNextProcessor.from_pretrained(model_path if not use_lora else base_model)
+    
     # Load model with quantization if specified
     model_kwargs = {
         "torch_dtype": torch.float16,
         "device_map": "auto"
     }
-
+    
     # Add flash attention if available
     if HAS_FLASH_ATTN:
         model_kwargs["use_flash_attention_2"] = True
-
+    
     if quantize:
         model_kwargs["load_in_4bit"] = True
         model = LlavaNextForConditionalGeneration.from_pretrained(
@@ -41,11 +42,11 @@ def load_model(model_path, use_lora=False, base_model="llava-hf/llava-v1.6-mistr
             base_model if use_lora else model_path,
             **model_kwargs
         )
-
+    
     # Load LoRA weights if using LoRA
     if use_lora:
         model = PeftModel.from_pretrained(model, model_path)
-
+    
     return model, processor
 
 def generate_meme_coin(model, processor, image_url, tweet_text, max_new_tokens=100):
@@ -55,24 +56,14 @@ def generate_meme_coin(model, processor, image_url, tweet_text, max_new_tokens=1
         response = requests.get(image_url, stream=True)
         response.raise_for_status()
         image = Image.open(BytesIO(response.content)).convert("RGB")
-
-        # Create conversation
-        conversation = [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": f"Tweet text: {tweet_text}" if tweet_text else ""},
-                    {"type": "image"}
-                ]
-            }
-        ]
-
-        # Apply chat template
-        prompt = processor.apply_chat_template(conversation, add_generation_prompt=True)
-
+        
         # Process inputs
-        inputs = processor(images=image, text=prompt, return_tensors="pt").to(model.device)
-
+        inputs = processor(
+            text=f"Tweet text: {tweet_text}" if tweet_text else "",
+            images=image,
+            return_tensors="pt"
+        ).to(model.device)
+        
         # Generate response
         with torch.no_grad():
             output = model.generate(
@@ -80,37 +71,48 @@ def generate_meme_coin(model, processor, image_url, tweet_text, max_new_tokens=1
                 max_new_tokens=max_new_tokens,
                 do_sample=False
             )
-
+        
         # Decode response
         generated_text = processor.decode(output[0], skip_special_tokens=True)
-
-        # Extract the assistant's response
-        assistant_response = generated_text.split("[/INST]")[-1].strip()
-
-        return assistant_response
-
+        
+        # Try to extract JSON from the response
+        try:
+            # Look for JSON-like structure
+            start_idx = generated_text.find("{")
+            end_idx = generated_text.rfind("}") + 1
+            
+            if start_idx >= 0 and end_idx > start_idx:
+                json_str = generated_text[start_idx:end_idx]
+                result = json.loads(json_str)
+                return result
+            else:
+                return {"error": "No JSON found in response", "raw_response": generated_text}
+        
+        except json.JSONDecodeError:
+            return {"error": "Invalid JSON in response", "raw_response": generated_text}
+    
     except Exception as e:
         return {"error": str(e)}
 
 def main(args):
     # Load model and processor
     model, processor = load_model(
-        args.model_path,
-        use_lora=args.use_lora,
+        args.model_path, 
+        use_lora=args.use_lora, 
         base_model=args.base_model,
         quantize=args.quantize
     )
-
+    
     # Generate meme coin
     result = generate_meme_coin(
-        model,
-        processor,
-        args.image_url,
-        args.tweet_text,
+        model, 
+        processor, 
+        args.image_url, 
+        args.tweet_text, 
         max_new_tokens=args.max_new_tokens
     )
-
-    print(result)
+    
+    print(json.dumps(result, indent=2))
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Generate meme coin name and ticker")
@@ -121,6 +123,6 @@ if __name__ == "__main__":
     parser.add_argument("--use_lora", action="store_true", help="Whether the model is fine-tuned with LoRA")
     parser.add_argument("--base_model", type=str, default="llava-hf/llava-v1.6-mistral-7b-hf", help="Base model path (for LoRA)")
     parser.add_argument("--quantize", action="store_true", help="Use 4-bit quantization")
-
+    
     args = parser.parse_args()
     main(args)
